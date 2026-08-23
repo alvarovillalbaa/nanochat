@@ -20,6 +20,7 @@ from nanochat.common import compute_init, compute_cleanup, get_base_dir, print0,
 from nanochat.checkpoint_manager import load_model
 from nanochat.checkpoint_manager import save_checkpoint
 from nanochat.engine import Engine
+from nanochat.report import get_report
 from scripts.chat_eval import run_chat_eval
 
 from tasks.common import TaskMixture
@@ -34,6 +35,10 @@ run = "dummy" # wandb run name default ("dummy" is special - we won't log to wan
 source = "mid" # base|mid , which checkpoint to load the model from (base model or midtrained model)
 model_tag = None # model tag to load the model from (base model or midtrained model)
 step = None # step to load the model from (base model or midtrained model)
+# data options
+use_teacher_data = False # opt in after generating teacher data; False preserves the original pipeline
+teacher_data_file = "teacher_sft.jsonl" # Path to teacher-distilled data (if use_teacher_data=True)
+teacher_data_weight = 0.5 # Weight of teacher data in mixture (0.0-1.0, if mixing with original)
 # compute/precision
 dtype = "bfloat16"
 device_batch_size = 4 # max to avoid OOM
@@ -75,12 +80,48 @@ engine = Engine(model, tokenizer) # will be used for inline model evaluation onl
 # -----------------------------------------------------------------------------
 # Task data mixture we'll train on
 
-train_ds = TaskMixture([
-    ARC(subset="ARC-Easy", split="train"), # 2.3K rows
-    ARC(subset="ARC-Challenge", split="train"), # 1.1K rows
-    GSM8K(subset="main", split="train"), # 8K rows
-    SmolTalk(split="train", stop=10_000), # 10K rows of smoltalk
-]) # 2.3K + 1.1K + 8K + 10K = 21.4K rows
+if use_teacher_data:
+    # Import CustomJSON for teacher-distilled data
+    from tasks.customjson import CustomJSON
+
+    if not 0.0 <= teacher_data_weight <= 1.0:
+        raise ValueError("teacher_data_weight must be between 0.0 and 1.0")
+
+    if teacher_data_weight >= 1.0:
+        # Use only teacher data
+        train_ds = CustomJSON(filepath=teacher_data_file, split="train")
+        print0(f"Training on teacher-distilled data only: {len(train_ds)} examples")
+    elif teacher_data_weight > 0.0:
+        # Mix teacher data with original datasets
+        teacher_ds = CustomJSON(filepath=teacher_data_file, split="train")
+        original_ds = TaskMixture([
+            ARC(subset="ARC-Easy", split="train"),
+            ARC(subset="ARC-Challenge", split="train"),
+            GSM8K(subset="main", split="train"),
+            SmolTalk(split="train", stop=10_000),
+        ])
+        # Create weighted mixture
+        train_ds = TaskMixture([teacher_ds, original_ds], weights=[teacher_data_weight, 1.0 - teacher_data_weight])
+        print0(f"Training on mixed data: {len(teacher_ds)} teacher + {len(original_ds)} original")
+    else:
+        # Fallback to original if weight is 0
+        train_ds = TaskMixture([
+            ARC(subset="ARC-Easy", split="train"),
+            ARC(subset="ARC-Challenge", split="train"),
+            GSM8K(subset="main", split="train"),
+            SmolTalk(split="train", stop=10_000),
+        ])
+        print0(f"Training on original datasets: {len(train_ds)} examples")
+else:
+    # Original nanochat task mixture
+    train_ds = TaskMixture([
+        ARC(subset="ARC-Easy", split="train"), # 2.3K rows
+        ARC(subset="ARC-Challenge", split="train"), # 1.1K rows
+        GSM8K(subset="main", split="train"), # 8K rows
+        SmolTalk(split="train", stop=10_000), # 10K rows of smoltalk
+    ]) # 2.3K + 1.1K + 8K + 10K = 21.4K rows
+    print0(f"Training on original datasets: {len(train_ds)} examples")
+
 val_ds = SmolTalk(split="test") # general conversations, 24K rows (though we don't actually use all of it)
 
 # -----------------------------------------------------------------------------
@@ -131,7 +172,12 @@ if max_iterations >= 0 and num_iterations > max_iterations:
     print0(f"Number of iterations is too high: {num_iterations}, capping to {max_iterations}")
     num_iterations = max_iterations
 train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
-build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size)
+
+
+def build_val_loader():
+    return sft_data_generator(val_ds, batch_size=device_batch_size)
+
+
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer
@@ -260,7 +306,6 @@ if master_process:
     print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
 # Log to report
-from nanochat.report import get_report
 get_report().log(section="Chat SFT", data=[
     user_config, # CLI args
     {

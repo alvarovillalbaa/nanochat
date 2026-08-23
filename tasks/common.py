@@ -5,6 +5,7 @@ metadata and often also evaluation criteria.
 Example tasks: MMLU, ARC-Easy, ARC-Challenge, GSM8K, HumanEval, SmolTalk.
 """
 
+import math
 import random
 
 class Task:
@@ -53,24 +54,76 @@ class Task:
 
 class TaskMixture(Task):
     """
-    For SFT Training it becomes useful to train on a tax mixture of datasets.
-    Fun trick: if you wish to oversample any task, just pass it in multiple times in the list.
+    For SFT Training it becomes useful to train on a task mixture of datasets.
+
+    Supports weighted sampling: pass weights=[0.4, 0.3, 0.3] to sample proportionally.
+    If weights are not provided, uniform sampling is used (each task equally represented).
+
+    Fun trick: if you wish to oversample any task without weights, just pass it in multiple times.
     """
 
-    def __init__(self, tasks, **kwargs):
+    def __init__(self, tasks, weights=None, **kwargs):
         super().__init__(**kwargs)
         # tasks is a list of Task objects
         self.tasks = tasks
         self.lengths = [len(task) for task in self.tasks]
-        self.num_conversations = sum(self.lengths)
-        # Build list of all (task_idx, local_idx) pairs
-        self.index_map = []
-        for task_idx, task_length in enumerate(self.lengths):
-            for local_idx in range(task_length):
-                self.index_map.append((task_idx, local_idx))
-        # Deterministically shuffle to mix tasks throughout training
-        rng = random.Random(42)
-        rng.shuffle(self.index_map)
+        self.weights = weights
+
+        if weights is not None:
+            # Weighted sampling: sample tasks proportionally to weights
+            if len(weights) != len(tasks):
+                raise ValueError(f"Number of weights ({len(weights)}) must match number of tasks ({len(tasks)})")
+            if not all(weight >= 0 for weight in weights):
+                raise ValueError("All weights must be non-negative")
+            if sum(weights) <= 0:
+                raise ValueError("Sum of weights must be positive")
+            if any(length == 0 and weight > 0 for length, weight in zip(self.lengths, weights)):
+                raise ValueError("A positive-weight task cannot be empty")
+
+            # Normalize weights
+            total_weight = sum(weights)
+            normalized_weights = [w / total_weight for w in weights]
+
+            # Scale the proportions until each positive-weight task contributes
+            # at least its full dataset once.
+            scale = max(
+                length / weight
+                for length, weight in zip(self.lengths, normalized_weights)
+                if weight > 0
+            )
+            sample_counts = [
+                math.ceil(scale * weight) if weight > 0 else 0
+                for weight in normalized_weights
+            ]
+
+            # Build index map with weighted sampling
+            self.index_map = []
+            for task_idx, (task_length, num_samples) in enumerate(
+                zip(self.lengths, sample_counts)
+            ):
+                if num_samples > 0:
+                    # Sample with replacement if needed
+                    for _ in range(num_samples):
+                        local_idx = _ % task_length  # Wrap around if needed
+                        self.index_map.append((task_idx, local_idx))
+
+            # Shuffle to mix tasks
+            rng = random.Random(42)
+            rng.shuffle(self.index_map)
+
+            # Update num_conversations to actual length
+            self.num_conversations = len(self.index_map)
+        else:
+            # Original uniform sampling
+            self.num_conversations = sum(self.lengths)
+            # Build list of all (task_idx, local_idx) pairs
+            self.index_map = []
+            for task_idx, task_length in enumerate(self.lengths):
+                for local_idx in range(task_length):
+                    self.index_map.append((task_idx, local_idx))
+            # Deterministically shuffle to mix tasks throughout training
+            rng = random.Random(42)
+            rng.shuffle(self.index_map)
         # Note: this is not the most elegant or best solution, but it's ok for now
 
     def num_examples(self):
