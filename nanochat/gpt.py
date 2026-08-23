@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nanochat.common import get_dist_info, print0
+from nanochat.common import get_dist_info
 from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
 
@@ -31,6 +31,8 @@ class GPTConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (MQA)
     n_embd: int = 768
+    # Metadata-free legacy checkpoints use the original ReLU^2 state-dict shape.
+    use_swiglu: bool = False # True = SwiGLU (opt-in), False = ReLU^2 (original)
 
 
 def norm(x):
@@ -129,13 +131,35 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        self.use_swiglu = config.use_swiglu
+
+        if self.use_swiglu:
+            # SwiGLU: x -> (W1*x * silu(W2*x)) @ W3
+            # More modern, used in LLaMA and similar models
+            # Uses 3 projections but better performance per FLOP
+            hidden_dim = int(4 * config.n_embd * 2 / 3)  # Common SwiGLU expansion (8/3)
+            # Round to nearest multiple of 256 for better hardware utilization
+            hidden_dim = ((hidden_dim + 255) // 256) * 256
+            self.c_fc1 = nn.Linear(config.n_embd, hidden_dim, bias=False)  # gate projection
+            self.c_fc2 = nn.Linear(config.n_embd, hidden_dim, bias=False)  # up projection
+            self.c_proj = nn.Linear(hidden_dim, config.n_embd, bias=False)  # down projection
+        else:
+            # Original ReLU^2 from nanochat
+            self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
+            self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = F.relu(x).square()
-        x = self.c_proj(x)
+        if self.use_swiglu:
+            # SwiGLU: element-wise product of gate and up projections
+            gate = self.c_fc1(x)
+            up = self.c_fc2(x)
+            x = F.silu(gate) * up  # SwiGLU activation
+            x = self.c_proj(x)
+        else:
+            # Original ReLU^2 activation
+            x = self.c_fc(x)
+            x = F.relu(x).square()
+            x = self.c_proj(x)
         return x
 
 
@@ -221,8 +245,16 @@ class GPT(nn.Module):
         """ Return the estimated FLOPs per token for the model. Ref: https://arxiv.org/abs/2204.02311 """
         nparams = sum(p.numel() for p in self.parameters())
         nparams_embedding = self.transformer.wte.weight.numel()
-        l, h, q, t = self.config.n_layer, self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
-        num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
+        layers, heads, head_dim, sequence_len = (
+            self.config.n_layer,
+            self.config.n_head,
+            self.config.n_embd // self.config.n_head,
+            self.config.sequence_len,
+        )
+        num_flops_per_token = (
+            6 * (nparams - nparams_embedding)
+            + 12 * layers * heads * head_dim * sequence_len
+        )
         return num_flops_per_token
 
     def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0):

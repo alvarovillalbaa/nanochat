@@ -21,6 +21,7 @@ from nanochat.tokenizer import get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.checkpoint_manager import load_model
+from nanochat.report import get_report
 import torch.distributed as dist
 
 from tasks.common import TaskMixture
@@ -136,7 +137,12 @@ def mid_data_generator(split):
         yield inputs, targets
 
 train_loader = mid_data_generator("train")
-build_val_loader = lambda: mid_data_generator("val")
+
+
+def build_val_loader():
+    return mid_data_generator("val")
+
+
 progress = 0 # will go from 0 to 1 over the course of the epoch
 
 # Learning rate scheduler
@@ -204,6 +210,7 @@ while True:
                     "n_head": model.config.n_head,
                     "n_kv_head": model.config.n_kv_head,
                     "n_embd": model.config.n_embd,
+                    "use_swiglu": model.config.use_swiglu,
                 },
                 "user_config": user_config, # inputs to the training script
             }
@@ -274,7 +281,6 @@ print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log to report
 if not dry_run:
-    from nanochat.report import get_report
     get_report().log(section="Midtraining", data=[
         user_config, # CLI args
         { # stats about the training setup

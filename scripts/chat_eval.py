@@ -93,7 +93,9 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
 
     # We'll process batches of independent problems at a time because there is no sampling needed
     num_problems = len(task_object) if max_problems is None else min(len(task_object), max_problems)
-    ceil_div = lambda x, y: -(-x // y)
+    def ceil_div(x, y):
+        return -(-x // y)
+
     num_batches = ceil_div(num_problems, batch_size)
 
     # Run the evaluation
@@ -123,7 +125,7 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
             letters = conversation['letters']
             letter_ids = []
             for letter in letters:
-                if not letter in letter_to_id_cache:
+                if letter not in letter_to_id_cache:
                     encoded_letter = tokenizer.encode(letter)
                     assert len(encoded_letter) == 1, "Each letter must be a single token"
                     letter_to_id_cache[letter] = encoded_letter[0]
@@ -180,7 +182,7 @@ if __name__ == "__main__":
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--source', type=str, required=True, help="Source of the model: sft|mid|rl")
+    parser.add_argument('-i', '--source', type=str, required=True, help="Source of the model: sft|mid|rl|dpo")
     parser.add_argument('-a', '--task-name', type=str, default=None, help="Task name. Default = all tasks. Use | to split multiple tasks.")
     parser.add_argument('-d', '--dtype', type=str, default='bfloat16', choices=['float32', 'bfloat16'])
     parser.add_argument('-t', '--temperature', type=float, default=0.0)

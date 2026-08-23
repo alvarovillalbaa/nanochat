@@ -97,6 +97,36 @@ And a bit more about computing environments that will run nanochat:
 
 If you'd like to tinker with nanochat on your Macbook or a CPU machine, there is a work in progress [CPU|MPS PR](https://github.com/karpathy/nanochat/pull/88) up here. If you're on Macbook, use `--device_type=mps` when running `base_train.py`. See the PR and its diff for more. You're not going to get too far without GPU nodes, but at least you'll be able to run the code and maybe train a very tiny LLM with some patience.
 
+## Quality Improvements
+
+nanochat includes several **optional, experimental** training extensions. They preserve the original defaults and need matched training/evaluation runs before making quality claims:
+
+- **Teacher Distillation** - Use frontier models (GPT-4, etc.) to generate high-quality training data
+- **DPO Training** - Simpler, more stable alternative to PPO for preference learning
+- **SwiGLU Activation** - Alternative MLP activation for new checkpoints (opt in at base training)
+- **Weighted Task Mixtures** - Fine-grained control over training data composition
+
+**Quick start with improvements:**
+```bash
+# Generate teacher-distilled data (requires the optional OpenAI SDK and API key)
+pip install openai
+export OPENAI_API_KEY='your-key'
+python -m scripts.gen_teacher_data --num-examples 20000
+
+# To create a SwiGLU checkpoint, opt in during base training; do not enable it
+# when resuming an existing ReLU-squared checkpoint.
+torchrun --standalone --nproc_per_node=8 -m scripts.base_train --use_swiglu=True
+
+# Train with teacher data after mid-training the same checkpoint architecture.
+torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft --use_teacher_data=True
+
+# Fine-tune with DPO instead of PPO
+python -m scripts.gen_preference_data --num-examples 1000
+torchrun --standalone --nproc_per_node=8 -m scripts.chat_dpo
+```
+
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for usage, compatibility constraints, and verification status. **All improvements are optional**; original training defaults remain unchanged.
+
 ## Questions
 
 nanochat is designed to be short and sweet. One big advantage of this is that we can package up all of the files together and copy paste them to your favorite LLM to ask arbitrary questions. As an example, I like to package up the repo using the [files-to-prompt](https://github.com/simonw/files-to-prompt) utility like so:

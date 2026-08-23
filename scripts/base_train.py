@@ -21,6 +21,7 @@ from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
+from nanochat.report import get_report
 from scripts.base_eval import evaluate_model
 print_banner()
 
@@ -30,6 +31,7 @@ run = "dummy" # wandb run name default ("dummy" is special - we won't log to wan
 # Model architecture
 depth = 20 # the depth of the Transformer model to train, rest of the kwargs are derived
 max_seq_len = 2048 # max context length
+use_swiglu = False # opt in to SwiGLU; False preserves existing checkpoint compatibility
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 target_flops = -1.0 # calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)
@@ -92,7 +94,7 @@ print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
 # -----------------------------------------------------------------------------
 # Initialize the Model
-model_config_kwargs = dict(sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim)
+model_config_kwargs = dict(sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim, use_swiglu=use_swiglu)
 with torch.device("meta"):
     model_config = GPTConfig(**model_config_kwargs)
     model = GPT(model_config)
@@ -134,7 +136,16 @@ adamw_optimizer, muon_optimizer = optimizers
 base_dir = get_base_dir()
 tokens_dir = os.path.join(base_dir, "tokenized_data")
 train_loader = tokenizing_distributed_data_loader(device_batch_size, max_seq_len, split="train")
-build_val_loader = lambda: tokenizing_distributed_data_loader(device_batch_size, max_seq_len, split="val")
+
+
+def build_val_loader():
+    return tokenizing_distributed_data_loader(
+        device_batch_size,
+        max_seq_len,
+        split="val",
+    )
+
+
 x, y = next(train_loader) # kick off load of the very first batch of data
 
 # -----------------------------------------------------------------------------
@@ -309,7 +320,6 @@ print0(f"Total training time: {total_training_time/60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log to report
-from nanochat.report import get_report
 get_report().log(section="Base model training", data=[
     user_config, # CLI args
     { # stats about the training setup
